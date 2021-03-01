@@ -202,7 +202,7 @@ static int libfab_ep_addr_decode_lnet(const char *name, char *node,
 			"portal: %u, tmid: %u", portal, tmid);
 	*/
 
-	portnum  = htons(tmid | (1 << 10) | ((portal - 30) << 11));
+	portnum = tmid | (1 << 10) | ((portal - 30) << 11);
 	sprintf(port, "%d", portnum);
 	fab_autotm[tmid] = 1;
 	return M0_RC(0);
@@ -468,22 +468,25 @@ static void libfab_tm_buf_done(struct m0_fab__tm *ftm)
 static uint32_t libfab_handle_connect_request_events(struct m0_fab__tm *tm)
 {
 	struct m0_fab__ep       *ep = NULL;
+	struct m0_fab__active_ep * aep;
 	struct fid_eq           *eq;
 	struct fi_eq_err_entry   eq_err;
 	struct fi_eq_cm_entry    entry;
-	struct m0_fab__ep_name   name;
-	uint64_t                 data;
+	char                    *name;
 	uint32_t                 event;
 	int                      rc;
 
 	eq = tm->ftm_pep->fep_listen->pep_ep_res.fer_eq;
-	rc = fi_eq_read(eq, &event, &entry, (sizeof(entry) + sizeof(data)), 0);
+	rc = fi_eq_read(eq, &event, &entry, 
+			(sizeof(entry) + LIBFAB_ADDR_STRLEN_MAX), 0);
 	if (rc >= sizeof(entry)) {
 		if (event == FI_CONNREQ) {
-			data = *(uint64_t *)entry.data;
-			libfab_ep_ntop(data, &name);
-			libfab_fab_ep_find(tm, &name, NULL, &ep);
-			rc = libfab_active_ep_create(ep, tm, entry.info);
+			name = (char*)entry.data;
+			libfab_fab_ep_find(tm, NULL, name, &ep);
+			aep = (ep->fep_listen != NULL) ? ep->fep_listen->pep_rx_ep :
+					 ep->fep_send;
+			if (aep->aep_state != FAB_CONNECTED)
+				rc = libfab_active_ep_create(ep, tm, entry.info);
 			fi_freeinfo(entry.info);
 		}
 	} else if (rc == -FI_EAVAIL) {
@@ -1588,7 +1591,7 @@ static int libfab_conn_init(struct m0_fab__ep *ep, struct m0_fab__tm *ma,
 {
 	struct m0_fab__active_ep *aep;
 	struct fi_info           *peer_fi;
-	uint64_t                  src;
+	char                     *src;
 	int                       ret = 0;
 
 	aep = (ep->fep_listen != NULL) ? ep->fep_listen->pep_tx_ep :
@@ -1596,13 +1599,13 @@ static int libfab_conn_init(struct m0_fab__ep *ep, struct m0_fab__tm *ma,
 	if (aep->aep_state == FAB_NOT_CONNECTED) {
 		ret = libfab_destaddr_get(&ep->fep_name, ma->ftm_fab->fab_fi,
 					  &peer_fi);
-		libfab_ep_pton(&ma->ftm_pep->fep_name, &src);
-		ret = fi_connect(aep->aep_ep, peer_fi->dest_addr, &src,
-				 sizeof(uint64_t));
+		src = (char *)ma->ftm_pep->fep_name.fen_str_addr;
+		ret = fi_connect(aep->aep_ep, peer_fi->dest_addr, src,
+				 LIBFAB_ADDR_STRLEN_MAX);
 		if (ret == FI_SUCCESS)
 			aep->aep_state = FAB_CONNECTING;
 		else
-			M0_LOG(M0_ALWAYS, " Conn req failed dst=%"PRIx64" src=%"PRIx64" ",
+			M0_LOG(M0_ERROR, " Conn=%d dst=%"PRIx64" src=%s", ret,
 				*(uint64_t*)peer_fi->dest_addr, src);
 		fi_freeinfo(peer_fi);
 	}
